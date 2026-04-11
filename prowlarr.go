@@ -17,14 +17,9 @@ type ProwlarrClient struct {
 }
 
 type SearchResult struct {
-	GUID        string `json:"guid"`
 	Title       string `json:"title"`
 	InfoURL     string `json:"infoUrl"`
 	DownloadURL string `json:"downloadUrl"`
-	IndexerID   int    `json:"indexerId"`
-	Indexer     string `json:"indexer"`
-	Seeders     int    `json:"seeders"`
-	Size        int64  `json:"size"`
 }
 
 func NewProwlarrClient(base, apiKey string) *ProwlarrClient {

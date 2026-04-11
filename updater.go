@@ -37,9 +37,37 @@ func (u *Updater) Run(ctx context.Context) error {
 	if err := u.qbit.Login(ctx); err != nil {
 		return err
 	}
-	torrents, err := u.qbit.ListTorrents(ctx)
+
+	stale, err := u.detectStale(ctx)
 	if err != nil {
 		return err
+	}
+	u.log.Info("stale torrents identified", "count", len(stale))
+
+	plans := u.planReplacements(ctx, stale)
+	u.log.Info("replacements planned",
+		"stale", len(stale), "replaceable", len(plans), "skipped", len(stale)-len(plans))
+
+	errs := u.executePlans(ctx, plans)
+	if len(errs) > 0 {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("%d torrent(s) failed to update:\n", len(errs)))
+		for _, e := range errs {
+			b.WriteString("  - ")
+			b.WriteString(e.Error())
+			b.WriteString("\n")
+		}
+		return fmt.Errorf("%s", b.String())
+	}
+	return nil
+}
+
+// detectStale fetches all torrents and returns those whose tracker status
+// indicates the torrent is no longer registered on the tracker.
+func (u *Updater) detectStale(ctx context.Context) ([]Torrent, error) {
+	torrents, err := u.qbit.ListTorrents(ctx)
+	if err != nil {
+		return nil, err
 	}
 	u.log.Info("fetched torrents", "count", len(torrents))
 
@@ -55,43 +83,38 @@ func (u *Updater) Run(ctx context.Context) error {
 			stale = append(stale, t)
 		}
 	}
-	u.log.Info("stale torrents identified", "count", len(stale))
+	return stale, nil
+}
 
-	// Resolve replacements via api.rutracker.cc.
+// planReplacements resolves each stale torrent against api.rutracker.cc and
+// returns the plans that are safe to execute (topic still alive, info_hash
+// changed). Unresolvable entries are logged and dropped.
+func (u *Updater) planReplacements(ctx context.Context, stale []Torrent) []replacement {
 	var plans []replacement
-	var skipped int
 	for _, t := range stale {
 		plan, err := u.resolvePlan(ctx, t)
 		if err != nil {
 			u.log.Warn("skipping — cannot resolve replacement",
 				"name", t.Name, "hash", t.Hash, "reason", err)
-			skipped++
 			continue
 		}
 		if plan == nil {
-			// Same info_hash — not a real re-upload, tracker hiccup.
 			u.log.Info("skipping — info_hash unchanged (transient tracker error?)",
 				"name", t.Name, "hash", t.Hash)
-			skipped++
 			continue
 		}
 		plans = append(plans, *plan)
 	}
-	u.log.Info("replacements planned",
-		"total_stale", len(stale), "replaceable", len(plans), "skipped", skipped)
+	return plans
+}
 
+// executePlans applies each replacement (or logs dry-run preview) and
+// collects per-torrent errors without aborting on the first failure.
+func (u *Updater) executePlans(ctx context.Context, plans []replacement) []updateError {
 	var errs []updateError
 	for _, plan := range plans {
 		if u.dryRun {
-			u.log.Info("[dry-run] would replace",
-				"name", plan.torrent.Name,
-				"hash", plan.torrent.Hash,
-				"new_info_hash", plan.info.InfoHash,
-				"topic", plan.topicURL,
-				"topic_title", plan.info.TopicTitle,
-				"category", plan.torrent.Category,
-				"save_path", plan.torrent.SavePath,
-			)
+			u.logPlan(plan)
 			continue
 		}
 		if err := u.applyPlan(ctx, plan); err != nil {
@@ -107,18 +130,19 @@ func (u *Updater) Run(ctx context.Context) error {
 			"category", plan.torrent.Category,
 		)
 	}
+	return errs
+}
 
-	if len(errs) > 0 {
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("%d torrent(s) failed to update:\n", len(errs)))
-		for _, e := range errs {
-			b.WriteString("  - ")
-			b.WriteString(e.Error())
-			b.WriteString("\n")
-		}
-		return fmt.Errorf("%s", b.String())
-	}
-	return nil
+func (u *Updater) logPlan(plan replacement) {
+	u.log.Info("[dry-run] would replace",
+		"name", plan.torrent.Name,
+		"hash", plan.torrent.Hash,
+		"new_info_hash", plan.info.InfoHash,
+		"topic", plan.topicURL,
+		"topic_title", plan.info.TopicTitle,
+		"category", plan.torrent.Category,
+		"save_path", plan.torrent.SavePath,
+	)
 }
 
 // resolvePlan asks the rutracker public API whether the torrent's topic is
