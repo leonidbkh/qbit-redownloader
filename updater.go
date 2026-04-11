@@ -25,8 +25,8 @@ func (e updateError) Error() string {
 	return fmt.Sprintf("%s (%s): %v", e.name, e.hash, e.err)
 }
 
-// replacement describes a planned replacement for a stale torrent.
-type replacement struct {
+// updatePlan describes a planned updatePlan for a stale torrent.
+type updatePlan struct {
 	torrent  Torrent
 	topicURL string
 	topicID  string
@@ -89,8 +89,8 @@ func (u *Updater) detectStale(ctx context.Context) ([]Torrent, error) {
 // planReplacements resolves each stale torrent against api.rutracker.cc and
 // returns the plans that are safe to execute (topic still alive, info_hash
 // changed). Unresolvable entries are logged and dropped.
-func (u *Updater) planReplacements(ctx context.Context, stale []Torrent) []replacement {
-	var plans []replacement
+func (u *Updater) planReplacements(ctx context.Context, stale []Torrent) []updatePlan {
+	var plans []updatePlan
 	for _, t := range stale {
 		plan, err := u.resolvePlan(ctx, t)
 		if err != nil {
@@ -108,9 +108,9 @@ func (u *Updater) planReplacements(ctx context.Context, stale []Torrent) []repla
 	return plans
 }
 
-// executePlans applies each replacement (or logs dry-run preview) and
+// executePlans applies each updatePlan (or logs dry-run preview) and
 // collects per-torrent errors without aborting on the first failure.
-func (u *Updater) executePlans(ctx context.Context, plans []replacement) []updateError {
+func (u *Updater) executePlans(ctx context.Context, plans []updatePlan) []updateError {
 	var errs []updateError
 	for _, plan := range plans {
 		if u.dryRun {
@@ -133,7 +133,7 @@ func (u *Updater) executePlans(ctx context.Context, plans []replacement) []updat
 	return errs
 }
 
-func (u *Updater) logPlan(plan replacement) {
+func (u *Updater) logPlan(plan updatePlan) {
 	u.log.Info("[dry-run] would replace",
 		"name", plan.torrent.Name,
 		"hash", plan.torrent.Hash,
@@ -149,9 +149,9 @@ func (u *Updater) logPlan(plan replacement) {
 // still alive under the same id with a different info_hash (i.e. a re-pack).
 // Returns:
 //   - (nil, nil) — info_hash unchanged, don't touch
-//   - (*replacement, nil) — topic alive with new info_hash, safe to replace
+//   - (*updatePlan, nil) — topic alive with new info_hash, safe to replace
 //   - (nil, err) — cannot determine (topic gone, non-rutracker, missing comment, etc.)
-func (u *Updater) resolvePlan(ctx context.Context, t Torrent) (*replacement, error) {
+func (u *Updater) resolvePlan(ctx context.Context, t Torrent) (*updatePlan, error) {
 	props, err := u.qbit.Properties(ctx, t.Hash)
 	if err != nil {
 		return nil, fmt.Errorf("get properties: %w", err)
@@ -179,7 +179,7 @@ func (u *Updater) resolvePlan(ctx context.Context, t Torrent) (*replacement, err
 		// Same hash — tracker is confused, nothing to do.
 		return nil, nil
 	}
-	return &replacement{
+	return &updatePlan{
 		torrent:  t,
 		topicURL: topicURL,
 		topicID:  topicID,
@@ -187,7 +187,7 @@ func (u *Updater) resolvePlan(ctx context.Context, t Torrent) (*replacement, err
 	}, nil
 }
 
-func (u *Updater) applyPlan(ctx context.Context, plan replacement) error {
+func (u *Updater) applyPlan(ctx context.Context, plan updatePlan) error {
 	// Use Prowlarr only as a download proxy: search and pick the result with
 	// the matching topic id to obtain an encrypted downloadUrl we can fetch.
 	query := searchQueryFromTitle(plan.info.TopicTitle)
@@ -231,32 +231,3 @@ func searchQueryFromTitle(title string) string {
 	return title
 }
 
-// staleReason returns the matched tracker message if the torrent looks stale
-// (re-uploaded / removed from tracker), or empty string otherwise.
-func staleReason(trackers []Tracker) string {
-	markers := []string{
-		"not registered",
-		"unregistered torrent",
-		"torrent not found",
-		"torrent does not exist",
-		"torrent not exist",
-		"torrent has been deleted",
-		"torrent was deleted",
-		"infohash not found",
-	}
-	for _, tr := range trackers {
-		if strings.HasPrefix(tr.URL, "**") {
-			continue
-		}
-		msg := strings.ToLower(strings.TrimSpace(tr.Msg))
-		if msg == "" {
-			continue
-		}
-		for _, m := range markers {
-			if strings.Contains(msg, m) {
-				return tr.Msg
-			}
-		}
-	}
-	return ""
-}
