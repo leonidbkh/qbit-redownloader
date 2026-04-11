@@ -1,0 +1,8 @@
+qbit:
+  url: http://localhost:8080
+  username: admin
+  password: adminadmin
+
+prowlarr:
+  url: http://localhost:9696
+  api_key: your-prowlarr-api-key
