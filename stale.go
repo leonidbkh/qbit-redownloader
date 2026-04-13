@@ -19,10 +19,15 @@ var staleMarkers = []string{
 
 // staleReason returns the tracker message that marked the torrent as stale,
 // or an empty string if none of the trackers reported it as unregistered.
+// Only rutracker torrents are considered — we can only resolve replacements
+// via api.rutracker.cc.
 func staleReason(trackers []Tracker) string {
 	for _, tr := range trackers {
 		if strings.HasPrefix(tr.URL, "**") {
 			continue // qBit-internal DHT/PEX/LSD entries
+		}
+		if !isRutrackerURL(tr.URL) {
+			continue
 		}
 		msg := strings.ToLower(strings.TrimSpace(tr.Msg))
 		if msg == "" {
@@ -35,4 +40,12 @@ func staleReason(trackers []Tracker) string {
 		}
 	}
 	return ""
+}
+
+func isRutrackerURL(u string) bool {
+	lower := strings.ToLower(u)
+	return strings.Contains(lower, "rutracker.org") ||
+		strings.Contains(lower, "rutracker.net") ||
+		strings.Contains(lower, "rutracker.nl") ||
+		strings.Contains(lower, "rutracker.cc")
 }
