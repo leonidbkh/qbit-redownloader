@@ -36,44 +36,73 @@ func NewRutrackerAPI() *RutrackerAPI {
 	}
 }
 
-// GetTopic returns TopicInfo for the given topic id, or (nil, nil) if the
-// topic no longer exists on rutracker.
-func (r *RutrackerAPI) GetTopic(ctx context.Context, topicID string) (*TopicInfo, error) {
-	u := fmt.Sprintf("%s/get_tor_topic_data?by=topic_id&val=%s", r.base, url.QueryEscape(topicID))
+// GetTopics returns a map of topic_id -> TopicInfo for the given ids.
+// A nil entry means rutracker reported the topic does not exist (deleted
+// or never existed). Missing keys mean the same — the API includes every
+// requested id in its response. Requests are split into chunks of
+// rutrackerBatchSize so a single URL stays well under server limits.
+func (r *RutrackerAPI) GetTopics(ctx context.Context, topicIDs []string) (map[string]*TopicInfo, error) {
+	out := make(map[string]*TopicInfo, len(topicIDs))
+	// rutracker API caps a single request at 50 ids; larger batches return
+	// {"error": {"code": 1, "text": "Param [val] is over the limit of 50"}}.
+	const chunkSize = 50
+	for i := 0; i < len(topicIDs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(topicIDs) {
+			end = len(topicIDs)
+		}
+		if err := r.fetchBatch(ctx, topicIDs[i:end], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (r *RutrackerAPI) fetchBatch(ctx context.Context, ids []string, out map[string]*TopicInfo) error {
+	val := strings.Join(ids, ",")
+	u := fmt.Sprintf("%s/get_tor_topic_data?by=topic_id&val=%s", r.base, url.QueryEscape(val))
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	resp, err := r.http.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("rutracker api %d: %s", resp.StatusCode, string(data))
+		return fmt.Errorf("rutracker api %d: %s", resp.StatusCode, string(data))
 	}
 	var wrapper struct {
 		Result map[string]json.RawMessage `json:"result"`
+		Error  *struct {
+			Code int    `json:"code"`
+			Text string `json:"text"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err != nil {
-		return nil, fmt.Errorf("parse rutracker api: %w", err)
+		return fmt.Errorf("parse rutracker api: %w", err)
 	}
-	raw, ok := wrapper.Result[topicID]
-	if !ok {
-		return nil, nil
+	if wrapper.Error != nil {
+		return fmt.Errorf("rutracker api error %d: %s", wrapper.Error.Code, wrapper.Error.Text)
 	}
-	if string(raw) == "null" {
-		return nil, nil
+	for _, id := range ids {
+		raw, ok := wrapper.Result[id]
+		if !ok || string(raw) == "null" {
+			out[id] = nil
+			continue
+		}
+		var info TopicInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return fmt.Errorf("parse topic info %s: %w", id, err)
+		}
+		out[id] = &info
 	}
-	var info TopicInfo
-	if err := json.Unmarshal(raw, &info); err != nil {
-		return nil, fmt.Errorf("parse topic info: %w", err)
-	}
-	return &info, nil
+	return nil
 }
 
 // IsRutrackerTopic reports whether the URL looks like a rutracker topic URL.

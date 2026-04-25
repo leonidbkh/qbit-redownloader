@@ -25,12 +25,21 @@ func (e updateError) Error() string {
 	return fmt.Sprintf("%s (%s): %v", e.name, e.hash, e.err)
 }
 
-// updatePlan describes a planned updatePlan for a stale torrent.
+// updatePlan describes a planned update for a stale torrent.
 type updatePlan struct {
 	torrent  Torrent
 	topicURL string
 	topicID  string
 	info     *TopicInfo // from api.rutracker.cc
+	reason   string     // "info_hash changed" / "tor_status=8 (дубликат)" / etc.
+}
+
+// candidate is an intermediate value: a rutracker torrent paired with its
+// resolved topic id, before we know whether it's stale.
+type candidate struct {
+	torrent  Torrent
+	topicID  string
+	topicURL string
 }
 
 func (u *Updater) Run(ctx context.Context) error {
@@ -38,15 +47,11 @@ func (u *Updater) Run(ctx context.Context) error {
 		return err
 	}
 
-	stale, err := u.detectStale(ctx)
+	plans, err := u.detectAndPlan(ctx)
 	if err != nil {
 		return err
 	}
-	u.log.Info("stale torrents identified", "count", len(stale))
-
-	plans := u.planReplacements(ctx, stale)
-	u.log.Info("replacements planned",
-		"stale", len(stale), "replaceable", len(plans), "skipped", len(stale)-len(plans))
+	u.log.Info("replacements planned", "count", len(plans))
 
 	errs := u.executePlans(ctx, plans)
 	if len(errs) > 0 {
@@ -62,50 +67,124 @@ func (u *Updater) Run(ctx context.Context) error {
 	return nil
 }
 
-// detectStale fetches all torrents and returns those whose tracker status
-// indicates the torrent is no longer registered on the tracker.
-func (u *Updater) detectStale(ctx context.Context) ([]Torrent, error) {
+// detectAndPlan walks every torrent in qBit, queries the rutracker API in
+// bulk, and returns plans for the ones that need replacing. It logs (but
+// does not return) torrents that look stale yet have no replacement (deleted
+// topic, obsolete status without a newer release on the same topic).
+func (u *Updater) detectAndPlan(ctx context.Context) ([]updatePlan, error) {
 	torrents, err := u.qbit.ListTorrents(ctx)
 	if err != nil {
 		return nil, err
 	}
 	u.log.Info("fetched torrents", "count", len(torrents))
 
-	var stale []Torrent
-	for _, t := range torrents {
-		trackers, err := u.qbit.Trackers(ctx, t.Hash)
-		if err != nil {
-			u.log.Warn("failed to read trackers", "hash", t.Hash, "name", t.Name, "err", err)
-			continue
-		}
-		if reason := staleReason(trackers); reason != "" {
-			u.log.Debug("stale match", "name", t.Name, "reason", reason)
-			stale = append(stale, t)
+	candidates := u.collectCandidates(ctx, torrents)
+	u.log.Info("rutracker torrents identified", "count", len(candidates))
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.topicID
+	}
+	apiResult, err := u.rutracker.GetTopics(ctx, ids)
+	if err != nil {
+		u.log.Warn("rutracker API failed — falling back to tracker messages", "err", err)
+		return u.fallbackToTrackerMessages(ctx, candidates), nil
+	}
+
+	var plans []updatePlan
+	for _, c := range candidates {
+		if plan := u.classify(c, apiResult[c.topicID]); plan != nil {
+			plans = append(plans, *plan)
 		}
 	}
-	return stale, nil
+	return plans, nil
 }
 
-// planReplacements resolves each stale torrent against api.rutracker.cc and
-// returns the plans that are safe to execute (topic still alive, info_hash
-// changed). Unresolvable entries are logged and dropped.
-func (u *Updater) planReplacements(ctx context.Context, stale []Torrent) []updatePlan {
-	var plans []updatePlan
-	for _, t := range stale {
-		plan, err := u.resolvePlan(ctx, t)
+// collectCandidates filters torrents to ones whose comment URL points at a
+// rutracker topic and pairs them with the parsed topic id. Torrents without
+// a rutracker comment are silently dropped — we have no way to resolve a
+// replacement for them anyway.
+func (u *Updater) collectCandidates(ctx context.Context, torrents []Torrent) []candidate {
+	var out []candidate
+	for _, t := range torrents {
+		props, err := u.qbit.Properties(ctx, t.Hash)
 		if err != nil {
-			u.log.Warn("skipping — cannot resolve replacement",
-				"name", t.Name, "hash", t.Hash, "reason", err)
+			u.log.Warn("failed to read properties", "hash", t.Hash, "name", t.Name, "err", err)
 			continue
 		}
-		if plan == nil {
-			u.log.Info("skipping — info_hash unchanged (transient tracker error?)",
-				"name", t.Name, "hash", t.Hash)
+		topicURL := strings.TrimSpace(props.Comment)
+		if !IsRutrackerTopic(topicURL) {
 			continue
 		}
-		plans = append(plans, *plan)
+		topicID := extractTopicID(topicURL)
+		if topicID == "" {
+			u.log.Warn("cannot extract topic id from comment", "name", t.Name, "comment", topicURL)
+			continue
+		}
+		out = append(out, candidate{torrent: t, topicID: topicID, topicURL: topicURL})
 	}
-	return plans
+	return out
+}
+
+// classify decides whether a single candidate needs replacement.
+// Returns:
+//   - non-nil plan — torrent is stale and the same topic carries a newer info_hash
+//   - nil          — healthy, or stale-but-unrecoverable (logged, not returned)
+func (u *Updater) classify(c candidate, info *TopicInfo) *updatePlan {
+	t := c.torrent
+	if info == nil {
+		u.log.Warn("topic deleted on rutracker — manual action needed",
+			"name", t.Name, "hash", t.Hash, "topic", c.topicURL)
+		return nil
+	}
+	sameHash := strings.EqualFold(info.InfoHash, t.Hash)
+	if sameHash {
+		if isObsoleteStatus(info.TorStatus) {
+			u.log.Warn("torrent obsolete on tracker, no newer version on same topic — manual action",
+				"name", t.Name, "hash", t.Hash, "tor_status", info.TorStatus,
+				"status_meaning", obsoleteStatuses[info.TorStatus], "topic", c.topicURL)
+		} else {
+			u.log.Debug("healthy", "name", t.Name, "tor_status", info.TorStatus)
+		}
+		return nil
+	}
+
+	reason := "info_hash changed"
+	if isObsoleteStatus(info.TorStatus) {
+		reason = fmt.Sprintf("info_hash changed + tor_status=%d (%s)",
+			info.TorStatus, obsoleteStatuses[info.TorStatus])
+	}
+	u.log.Info("stale: replacement available",
+		"name", t.Name, "old_hash", t.Hash, "new_hash", strings.ToLower(info.InfoHash),
+		"tor_status", info.TorStatus, "topic", c.topicURL)
+	return &updatePlan{
+		torrent:  t,
+		topicURL: c.topicURL,
+		topicID:  c.topicID,
+		info:     info,
+		reason:   reason,
+	}
+}
+
+// fallbackToTrackerMessages is used only when the rutracker API is
+// unreachable. It scans tracker messages for "torrent removed" markers and
+// logs matches — but cannot produce an updatePlan, since we don't know the
+// new info_hash without the API.
+func (u *Updater) fallbackToTrackerMessages(ctx context.Context, candidates []candidate) []updatePlan {
+	for _, c := range candidates {
+		trackers, err := u.qbit.Trackers(ctx, c.torrent.Hash)
+		if err != nil {
+			continue
+		}
+		if reason := staleReasonFromTracker(trackers); reason != "" {
+			u.log.Warn("tracker reports stale (API down — cannot resolve replacement)",
+				"name", c.torrent.Name, "hash", c.torrent.Hash, "msg", reason)
+		}
+	}
+	return nil
 }
 
 // executePlans applies each updatePlan (or logs dry-run preview) and
@@ -142,49 +221,8 @@ func (u *Updater) logPlan(plan updatePlan) {
 		"topic_title", plan.info.TopicTitle,
 		"category", plan.torrent.Category,
 		"save_path", plan.torrent.SavePath,
+		"reason", plan.reason,
 	)
-}
-
-// resolvePlan asks the rutracker public API whether the torrent's topic is
-// still alive under the same id with a different info_hash (i.e. a re-pack).
-// Returns:
-//   - (nil, nil) — info_hash unchanged, don't touch
-//   - (*updatePlan, nil) — topic alive with new info_hash, safe to replace
-//   - (nil, err) — cannot determine (topic gone, non-rutracker, missing comment, etc.)
-func (u *Updater) resolvePlan(ctx context.Context, t Torrent) (*updatePlan, error) {
-	props, err := u.qbit.Properties(ctx, t.Hash)
-	if err != nil {
-		return nil, fmt.Errorf("get properties: %w", err)
-	}
-	topicURL := strings.TrimSpace(props.Comment)
-	if topicURL == "" || !strings.HasPrefix(topicURL, "http") {
-		return nil, fmt.Errorf("torrent has no topic URL in comment")
-	}
-	if !IsRutrackerTopic(topicURL) {
-		return nil, fmt.Errorf("non-rutracker topic (%s) — unsupported", topicURL)
-	}
-	topicID := extractTopicID(topicURL)
-	if topicID == "" {
-		return nil, fmt.Errorf("cannot extract topic id from %s", topicURL)
-	}
-
-	info, err := u.rutracker.GetTopic(ctx, topicID)
-	if err != nil {
-		return nil, fmt.Errorf("rutracker api: %w", err)
-	}
-	if info == nil {
-		return nil, fmt.Errorf("topic %s no longer exists on rutracker (deleted, not a re-pack)", topicID)
-	}
-	if strings.EqualFold(info.InfoHash, t.Hash) {
-		// Same hash — tracker is confused, nothing to do.
-		return nil, nil
-	}
-	return &updatePlan{
-		torrent:  t,
-		topicURL: topicURL,
-		topicID:  topicID,
-		info:     info,
-	}, nil
 }
 
 func (u *Updater) applyPlan(ctx context.Context, plan updatePlan) error {
@@ -219,8 +257,6 @@ func searchQueryFromTitle(title string) string {
 	if i := strings.IndexAny(title, "[("); i >= 0 {
 		title = title[:i]
 	}
-	// Take the first segment before "/" (usually the Russian title) — rutracker
-	// search matches any segment; shorter queries work better.
 	if i := strings.Index(title, "/"); i >= 0 {
 		title = title[:i]
 	}
@@ -230,4 +266,3 @@ func searchQueryFromTitle(title string) string {
 	}
 	return title
 }
-
