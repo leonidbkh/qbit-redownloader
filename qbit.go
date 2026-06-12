@@ -69,7 +69,9 @@ func (c *QbitClient) Login(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 || !strings.Contains(string(body), "Ok") {
+	ok := resp.StatusCode == 204 ||
+		(resp.StatusCode == 200 && strings.Contains(string(body), "Ok"))
+	if !ok {
 		return fmt.Errorf("qbit login failed: status=%d body=%s", resp.StatusCode, string(body))
 	}
 	c.logged = true
