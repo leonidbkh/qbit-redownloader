@@ -1,7 +1,6 @@
 qbit:
   url: http://localhost:8080
-  username: admin
-  password: adminadmin
+  api_key: qbt_your-api-key
 
 prowlarr:
   url: http://localhost:9696

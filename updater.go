@@ -43,10 +43,6 @@ type candidate struct {
 }
 
 func (u *Updater) Run(ctx context.Context) error {
-	if err := u.qbit.Login(ctx); err != nil {
-		return err
-	}
-
 	plans, err := u.detectAndPlan(ctx)
 	if err != nil {
 		return err

@@ -23,15 +23,16 @@ Configuration via YAML or environment variables:
 ```yaml
 qbit:
   url: http://localhost:8080
-  username: admin
-  password: adminadmin
+  api_key: qbt_your-api-key
 prowlarr:
   url: http://localhost:9696
   api_key: your-prowlarr-api-key
 ```
 
-Env vars override YAML: `QBIT_URL`, `QBIT_USERNAME`, `QBIT_PASSWORD`,
-`PROWLARR_URL`, `PROWLARR_API_KEY`.
+Env vars override YAML: `QBIT_URL`, `QBIT_API_KEY`, `QBIT_API_KEY_FILE`,
+`PROWLARR_URL`, `PROWLARR_API_KEY`. `QBIT_API_KEY_FILE` may point either to a
+file containing only the key or to qBittorrent's `qBittorrent.conf`; in the
+latter case `WebUI\APIKey=...` is extracted.
 
 ## Build
 

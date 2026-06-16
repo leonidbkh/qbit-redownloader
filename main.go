@@ -29,7 +29,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	qbit, err := NewQbitClient(cfg.Qbit.URL, cfg.Qbit.Username, cfg.Qbit.Password)
+	qbit, err := NewQbitClient(cfg.Qbit.URL, cfg.Qbit.APIKey)
 	if err != nil {
 		log.Error("qbit client", "err", err)
 		os.Exit(1)

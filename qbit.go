@@ -8,7 +8,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 )
@@ -16,9 +15,7 @@ import (
 type QbitClient struct {
 	base   string
 	http   *http.Client
-	user   string
-	pass   string
-	logged bool
+	apiKey string
 }
 
 type Torrent struct {
@@ -40,42 +37,12 @@ type Tracker struct {
 	Msg    string `json:"msg"`
 }
 
-func NewQbitClient(base, user, pass string) (*QbitClient, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
+func NewQbitClient(base, apiKey string) (*QbitClient, error) {
 	return &QbitClient{
-		base: strings.TrimRight(base, "/"),
-		http: &http.Client{Jar: jar},
-		user: user,
-		pass: pass,
+		base:   strings.TrimRight(base, "/"),
+		http:   &http.Client{},
+		apiKey: apiKey,
 	}, nil
-}
-
-func (c *QbitClient) Login(ctx context.Context) error {
-	form := url.Values{}
-	form.Set("username", c.user)
-	form.Set("password", c.pass)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.base+"/api/v2/auth/login", strings.NewReader(form.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Referer", c.base)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("qbit login: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	ok := resp.StatusCode == 204 ||
-		(resp.StatusCode == 200 && strings.Contains(string(body), "Ok"))
-	if !ok {
-		return fmt.Errorf("qbit login failed: status=%d body=%s", resp.StatusCode, string(body))
-	}
-	c.logged = true
-	return nil
 }
 
 func (c *QbitClient) do(ctx context.Context, method, path string, body io.Reader, contentType string) ([]byte, error) {
@@ -86,6 +53,7 @@ func (c *QbitClient) do(ctx context.Context, method, path string, body io.Reader
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Referer", c.base)
 	resp, err := c.http.Do(req)
 	if err != nil {
