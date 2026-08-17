@@ -117,3 +117,25 @@ func IsRutrackerTopic(topicURL string) bool {
 		strings.HasSuffix(host, "rutracker.nl") ||
 		strings.HasSuffix(host, "rutracker.cc")
 }
+
+func extractTopicID(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if id := parsed.Query().Get("t"); topicIDPattern.MatchString(id) {
+		return id
+	}
+	if id := parsed.Query().Get("id"); topicIDPattern.MatchString(id) {
+		return id
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	last := strings.TrimSuffix(parts[len(parts)-1], ".html")
+	if topicIDPattern.MatchString(last) {
+		return last
+	}
+	return ""
+}

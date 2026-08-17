@@ -14,10 +14,10 @@ type Config struct {
 		APIKey     string `yaml:"api_key"`
 		APIKeyFile string `yaml:"api_key_file"`
 	} `yaml:"qbit"`
-	Prowlarr struct {
-		URL    string `yaml:"url"`
-		APIKey string `yaml:"api_key"`
-	} `yaml:"prowlarr"`
+	Rutracker struct {
+		ForumURL        string `yaml:"forum_url"`
+		FlareSolverrURL string `yaml:"flaresolverr_url"`
+	} `yaml:"rutracker"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -40,11 +40,11 @@ func LoadConfig(path string) (*Config, error) {
 	if v := os.Getenv("QBIT_API_KEY_FILE"); v != "" {
 		cfg.Qbit.APIKeyFile = v
 	}
-	if v := os.Getenv("PROWLARR_URL"); v != "" {
-		cfg.Prowlarr.URL = v
+	if v := os.Getenv("RUTRACKER_FORUM_URL"); v != "" {
+		cfg.Rutracker.ForumURL = v
 	}
-	if v := os.Getenv("PROWLARR_API_KEY"); v != "" {
-		cfg.Prowlarr.APIKey = v
+	if v := os.Getenv("FLARESOLVERR_URL"); v != "" {
+		cfg.Rutracker.FlareSolverrURL = v
 	}
 	if cfg.Qbit.URL == "" {
 		return nil, fmt.Errorf("qbit.url is required")
@@ -59,8 +59,11 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Qbit.APIKey == "" {
 		return nil, fmt.Errorf("qbit.api_key is required")
 	}
-	if cfg.Prowlarr.URL == "" || cfg.Prowlarr.APIKey == "" {
-		return nil, fmt.Errorf("prowlarr.url and prowlarr.api_key are required")
+	if cfg.Rutracker.ForumURL == "" {
+		cfg.Rutracker.ForumURL = "https://rutracker.org/forum"
+	}
+	if cfg.Rutracker.FlareSolverrURL == "" {
+		return nil, fmt.Errorf("rutracker.flaresolverr_url is required")
 	}
 	return cfg, nil
 }

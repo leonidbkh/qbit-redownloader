@@ -1,15 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type QbitClient struct {
@@ -19,12 +18,14 @@ type QbitClient struct {
 }
 
 type Torrent struct {
-	Hash     string `json:"hash"`
-	Name     string `json:"name"`
-	SavePath string `json:"save_path"`
-	Tracker  string `json:"tracker"`
-	Category string `json:"category"`
-	Tags     string `json:"tags"`
+	Hash      string `json:"hash"`
+	Name      string `json:"name"`
+	SavePath  string `json:"save_path"`
+	Tracker   string `json:"tracker"`
+	Category  string `json:"category"`
+	Tags      string `json:"tags"`
+	State     string `json:"state"`
+	TotalSize int64  `json:"total_size"`
 }
 
 type TorrentProperties struct {
@@ -82,6 +83,23 @@ func (c *QbitClient) ListTorrents(ctx context.Context) ([]Torrent, error) {
 	return out, nil
 }
 
+func (c *QbitClient) TorrentByHash(ctx context.Context, hash string) (*Torrent, error) {
+	data, err := c.do(ctx, "GET", "/api/v2/torrents/info?hashes="+url.QueryEscape(strings.ToLower(hash)), nil, "")
+	if err != nil {
+		return nil, err
+	}
+	var torrents []Torrent
+	if err := json.Unmarshal(data, &torrents); err != nil {
+		return nil, fmt.Errorf("parse torrent lookup: %w", err)
+	}
+	for i := range torrents {
+		if strings.EqualFold(torrents[i].Hash, hash) {
+			return &torrents[i], nil
+		}
+	}
+	return nil, nil
+}
+
 func (c *QbitClient) Properties(ctx context.Context, hash string) (*TorrentProperties, error) {
 	data, err := c.do(ctx, "GET", "/api/v2/torrents/properties?hash="+hash, nil, "")
 	if err != nil {
@@ -106,39 +124,74 @@ func (c *QbitClient) Trackers(ctx context.Context, hash string) ([]Tracker, erro
 	return out, nil
 }
 
-func (c *QbitClient) AddTorrent(ctx context.Context, torrentBytes []byte, name string, savePath string, category string, tags string) error {
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-
-	fw, err := mw.CreateFormFile("torrents", name+".torrent")
-	if err != nil {
-		return err
-	}
-	if _, err := fw.Write(torrentBytes); err != nil {
-		return err
-	}
-
-	fields := map[string]string{
-		"savepath":      savePath,
-		"skip_checking": "false",
-		"autoTMM":       "false",
-	}
+func (c *QbitClient) AddMagnet(ctx context.Context, magnet, savePath, category, tags string) error {
+	form := url.Values{}
+	form.Set("urls", magnet)
+	form.Set("savepath", savePath)
+	form.Set("skip_checking", "false")
+	form.Set("autoTMM", "false")
+	form.Set("stopped", "false")
 	if category != "" {
-		fields["category"] = category
+		form.Set("category", category)
 	}
 	if tags != "" {
-		fields["tags"] = tags
+		form.Set("tags", tags)
 	}
-	for k, v := range fields {
-		if err := mw.WriteField(k, v); err != nil {
-			return err
+	_, err := c.do(ctx, "POST", "/api/v2/torrents/add", strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
+	return err
+}
+
+func (c *QbitClient) WaitForTorrentReady(ctx context.Context, hash string, timeout time.Duration) (*Torrent, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		torrent, err := c.TorrentByHash(ctx, hash)
+		if err != nil {
+			return nil, err
+		}
+		if torrent != nil && torrent.TotalSize > 0 && torrent.State != "metaDL" {
+			return torrent, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("torrent %s did not become ready within %s", hash, timeout)
+		case <-ticker.C:
 		}
 	}
-	if err := mw.Close(); err != nil {
-		return err
-	}
+}
 
-	_, err = c.do(ctx, "POST", "/api/v2/torrents/add", &buf, mw.FormDataContentType())
+func (c *QbitClient) Stop(ctx context.Context, hash string) error {
+	form := url.Values{}
+	form.Set("hashes", hash)
+	_, err := c.do(ctx, "POST", "/api/v2/torrents/stop", strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
+	return err
+}
+
+func (c *QbitClient) SetComment(ctx context.Context, hash, comment string) error {
+	form := url.Values{}
+	form.Set("hashes", hash)
+	form.Set("comment", comment)
+	_, err := c.do(ctx, "POST", "/api/v2/torrents/setComment", strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
+	return err
+}
+
+func (c *QbitClient) AddTags(ctx context.Context, hash, tags string) error {
+	form := url.Values{}
+	form.Set("hashes", hash)
+	form.Set("tags", tags)
+	_, err := c.do(ctx, "POST", "/api/v2/torrents/addTags", strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
+	return err
+}
+
+func (c *QbitClient) RemoveTags(ctx context.Context, hash, tags string) error {
+	form := url.Values{}
+	form.Set("hashes", hash)
+	form.Set("tags", tags)
+	_, err := c.do(ctx, "POST", "/api/v2/torrents/removeTags", strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
 	return err
 }
 
