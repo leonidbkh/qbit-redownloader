@@ -1,20 +1,25 @@
 # qbit-redownloader
 
-Detects stale rutracker torrents in qBittorrent and replaces them with fresh
-copies via Prowlarr.
+Detects stale RuTracker torrents in qBittorrent and replaces them by resolving
+the immutable RuTracker `topic_id`. Title text is never used for matching.
 
-A torrent is considered stale when the rutracker API reports a different
-`info_hash` for the same topic, or when the topic's `tor_status` indicates the
-release is obsolete. The tool re-downloads the `.torrent` file through Prowlarr
-(used purely as a download proxy) and re-adds it to qBittorrent under the same
-save path, category and tags, then deletes the old torrent without removing
-files.
+A torrent is considered stale when the RuTracker API reports a different
+`info_hash`, or when the RuTracker announcer reports that it is no longer
+registered. Because the public API may be disabled, the tool can load the exact
+topic page through a configurable FlareSolverr endpoint and extract its magnet.
+
+The replacement is staged under the same save path, category and tags. The old
+torrent is deleted with `deleteFiles=false` only after qBittorrent exposes the
+exact expected hash and has received its metadata. A failed or ambiguous
+resolution leaves the old torrent untouched.
 
 ## Usage
 
 ```bash
 qbit-redownloader -config config.yaml
 qbit-redownloader -dry-run    # report stale torrents without updating
+qbit-redownloader -topic-id 6875876 -dry-run  # canary one exact topic
+qbit-redownloader -topic-id 6875876 -adopt-hash <40-hex-hash>
 qbit-redownloader -debug      # verbose logging
 ```
 
@@ -24,15 +29,15 @@ Configuration via YAML or environment variables:
 qbit:
   url: http://localhost:8080
   api_key: qbt_your-api-key
-prowlarr:
-  url: http://localhost:9696
-  api_key: your-prowlarr-api-key
+rutracker:
+  forum_url: https://rutracker.org/forum
+  flaresolverr_url: http://localhost:8191
 ```
 
 Env vars override YAML: `QBIT_URL`, `QBIT_API_KEY`, `QBIT_API_KEY_FILE`,
-`PROWLARR_URL`, `PROWLARR_API_KEY`. `QBIT_API_KEY_FILE` may point either to a
-file containing only the key or to qBittorrent's `qBittorrent.conf`; in the
-latter case `WebUI\APIKey=...` is extracted.
+`RUTRACKER_FORUM_URL`, `FLARESOLVERR_URL`. `QBIT_API_KEY_FILE` may point either
+to a file containing only the key or to qBittorrent's `qBittorrent.conf`; in
+the latter case `WebUI\APIKey=...` is extracted.
 
 ## Build
 
@@ -42,11 +47,8 @@ go build -o qbit-redownloader .
 nix build .#default
 ```
 
-## NixOS
-
-The flake exposes `packages.default` for use as a flake input. See
-[homelab-nix](https://github.com/leonidbkh/homelab-nix) for an example
-systemd service + timer integration.
+The executable has no Kubernetes-specific discovery or API dependency. Both
+qBittorrent and FlareSolverr are ordinary configured HTTP endpoints.
 
 ## License
 

@@ -2,6 +2,6 @@ qbit:
   url: http://localhost:8080
   api_key: qbt_your-api-key
 
-prowlarr:
-  url: http://localhost:9696
-  api_key: your-prowlarr-api-key
+rutracker:
+  forum_url: https://rutracker.org/forum
+  flaresolverr_url: http://localhost:8191
